@@ -1,0 +1,145 @@
+import streamlit as st
+import numpy as np
+from PIL import Image
+import gdown
+import os
+
+from ai_edge_litert.interpreter import Interpreter
+
+
+st.set_page_config(
+    page_title="Fish Counter AI",
+    page_icon="🐟",
+    layout="centered"
+)
+
+st.title("🐟 Fish Counter AI Eksperimen")
+st.write("Upload gambar benih ikan, lalu klik tombol untuk menghitung jumlah ikan.")
+
+# CSS untuk tombol hijau
+st.markdown(
+    """
+    <style>
+    div.stButton > button {
+        background-color: #16a34a !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        padding: 0.6rem 1rem !important;
+        font-weight: 600 !important;
+    }
+
+    div.stButton > button:hover {
+        background-color: #15803d !important;
+        color: white !important;
+        border: none !important;
+    }
+
+    div.stButton > button:active {
+        background-color: #166534 !important;
+        color: white !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# Link model TFLite terbaru dari Google Drive
+MODEL_URL = "https://drive.google.com/uc?id=1rMUiMeQspGhDTuyttyEpGcR7eexQYqMr"
+
+# Nama file dibuat baru agar Streamlit tidak memakai cache/model lama
+MODEL_PATH = "fish_counter_model_eksperimen_baru.tflite"
+
+
+@st.cache_resource
+def load_model(model_url, model_path):
+    if not os.path.exists(model_path):
+        with st.spinner("Mengunduh model..."):
+            gdown.download(model_url, model_path, quiet=False)
+
+    interpreter = Interpreter(model_path=model_path)
+    interpreter.allocate_tensors()
+    return interpreter
+
+
+def predict_fish_count(image, interpreter):
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
+    # Resize gambar sesuai input model
+    img = image.resize((224, 224))
+
+    # Tidak memakai /255.0
+    # Input gambar menggunakan rentang 0-255
+    img_array = np.array(img).astype(np.float32)
+    img_array = np.expand_dims(img_array, axis=0)
+
+    # Cek tipe input model TFLite
+    input_dtype = input_details[0]["dtype"]
+
+    if input_dtype in [np.uint8, np.int8]:
+        input_scale, input_zero_point = input_details[0]["quantization"]
+
+        if input_scale > 0:
+            img_array = img_array / input_scale + input_zero_point
+
+        img_array = np.clip(
+            img_array,
+            np.iinfo(input_dtype).min,
+            np.iinfo(input_dtype).max
+        ).astype(input_dtype)
+    else:
+        img_array = img_array.astype(np.float32)
+
+    # Jalankan prediksi
+    interpreter.set_tensor(input_details[0]["index"], img_array)
+    interpreter.invoke()
+
+    prediction = interpreter.get_tensor(output_details[0]["index"])
+    pred_value = float(prediction.ravel()[0])
+
+    # Jika output model bertipe quantized, kembalikan ke skala asli
+    output_dtype = output_details[0]["dtype"]
+
+    if output_dtype in [np.uint8, np.int8, np.int16, np.int32]:
+        output_scale, output_zero_point = output_details[0]["quantization"]
+
+        if output_scale > 0:
+            pred_value = (pred_value - output_zero_point) * output_scale
+
+    hasil = int(np.round(pred_value))
+
+    if hasil < 0:
+        hasil = 0
+
+    return hasil
+
+
+# Load model
+interpreter = load_model(MODEL_URL, MODEL_PATH)
+
+
+uploaded_file = st.file_uploader(
+    "Upload gambar benih ikan",
+    type=["jpg", "jpeg", "png"]
+)
+
+
+if uploaded_file is not None:
+    image = Image.open(uploaded_file).convert("RGB")
+
+    st.image(
+        image,
+        caption="Gambar yang di-upload",
+        use_container_width=True
+    )
+
+    if st.button("Hitung Jumlah Ikan", use_container_width=True):
+        with st.spinner("Sedang menghitung jumlah ikan..."):
+            hasil = predict_fish_count(image, interpreter)
+
+        st.success(f"Estimasi jumlah benih ikan: {hasil} ekor")
+
+else:
+    st.info("Silakan upload gambar terlebih dahulu.")
